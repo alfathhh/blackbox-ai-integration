@@ -22,6 +22,9 @@ const INACTIVITY_TIMEOUT = 2 * 60 * 1000; // 2 minutes
 let authClient;
 let sheets;
 
+// Track if bot is running to prevent multiple startBot calls
+let botRunning = false;
+
 // Authorize Google API client using service account
 async function authorizeGoogle() {
     try {
@@ -45,20 +48,28 @@ async function authorizeGoogle() {
     }
 }
 
-// Append chat log to Google Spreadsheet
-async function appendChatLog(timestamp, from, message, senderType) {
+// Append chat log to Google Spreadsheet with retry logic
+async function appendChatLog(timestamp, from, message, senderType, retries = 3) {
     if (!sheets) return;
     const values = [[timestamp, from, message, senderType]];
     const resource = { values };
-    try {
-        await sheets.spreadsheets.values.append({
-            spreadsheetId: SPREADSHEET_ID,
-            range: `${SHEET_NAME}!A:D`,
-            valueInputOption: 'RAW',
-            resource,
-        });
-    } catch (error) {
-        logger.error("Error appending chat log:", error);
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            await sheets.spreadsheets.values.append({
+                spreadsheetId: SPREADSHEET_ID,
+                range: `${SHEET_NAME}!A:D`,
+                valueInputOption: 'RAW',
+                resource,
+            });
+            break; // success
+        } catch (error) {
+            logger.error(`Error appending chat log (attempt ${attempt}):`, error);
+            if (attempt === retries) {
+                logger.error("Max retries reached for appending chat log.");
+            } else {
+                await new Promise(res => setTimeout(res, 1000 * attempt)); // exponential backoff
+            }
+        }
     }
 }
 
@@ -82,6 +93,23 @@ const MENUS = {
     produk1: ['Detail Produk 1', 'Kembali ke menu sebelumnya']
 };
 
+// Conversation class to encapsulate state and timeout
+class Conversation {
+    constructor() {
+        this.state = 'main';
+        this.csActive = false;
+        this.timeout = null;
+    }
+
+    resetTimeout(sock, jid) {
+        if (this.timeout) clearTimeout(this.timeout);
+        this.timeout = setTimeout(async () => {
+            await sendMessage(sock, jid, "Percakapan diakhiri karena tidak ada jawaban selama 2 menit.", true);
+            conversations.delete(jid);
+        }, INACTIVITY_TIMEOUT);
+    }
+}
+
 // Conversation states per user
 const conversations = new Map();
 
@@ -100,18 +128,7 @@ async function sendMessage(sock, jid, message, isBot = true) {
     }
 }
 
-// Reset inactivity timeout for a conversation
-function resetInactivityTimeout(sock, jid) {
-    const conv = conversations.get(jid);
-    if (!conv) return;
-    if (conv.timeout) clearTimeout(conv.timeout);
-    conv.timeout = setTimeout(async () => {
-        await sendMessage(sock, jid, "Percakapan diakhiri karena tidak ada jawaban selama 2 menit.", true);
-        conversations.delete(jid);
-    }, INACTIVITY_TIMEOUT);
-}
-
-// Handle incoming messages and menu navigation
+// Centralized message handler with inactivity timeout reset
 async function handleMessage(sock, msg) {
     if (!msg.message || msg.key.fromMe) return;
 
@@ -123,13 +140,9 @@ async function handleMessage(sock, msg) {
 
     // Initialize conversation if new user
     if (!conversations.has(jid)) {
-        conversations.set(jid, {
-            state: 'main',
-            csActive: false,
-            timeout: null,
-        });
+        conversations.set(jid, new Conversation());
         await sendMessage(sock, jid, `Halo! Selamat datang.\n${formatMenu('Menu', MENUS.main)}`);
-        resetInactivityTimeout(sock, jid);
+        conversations.get(jid).resetTimeout(sock, jid);
         return;
     }
 
@@ -141,11 +154,11 @@ async function handleMessage(sock, msg) {
             conv.csActive = false;
             conv.state = 'main';
             await sendMessage(sock, jid, "Percakapan kembali diambil alih oleh bot.");
-            resetInactivityTimeout(sock, jid);
+            conv.resetTimeout(sock, jid);
             return;
         } else {
             // Simulate forwarding message to CS or user
-            resetInactivityTimeout(sock, jid);
+            conv.resetTimeout(sock, jid);
             return;
         }
     }
@@ -176,7 +189,7 @@ async function handleMessage(sock, msg) {
         default:
             conv.state = 'main';
             await sendMessage(sock, jid, formatMenu('Menu', MENUS.main));
-            resetInactivityTimeout(sock, jid);
+            conv.resetTimeout(sock, jid);
             break;
     }
 }
@@ -208,7 +221,7 @@ async function handleMainMenu(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Menu', MENUS.main));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 async function handleInfoMenu(sock, jid, messageText, conv) {
@@ -225,7 +238,7 @@ async function handleInfoMenu(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Menu Info', MENUS.info));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 async function handlePdrbMenu(sock, jid, messageText, conv) {
@@ -238,7 +251,7 @@ async function handlePdrbMenu(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Menu PDRB', MENUS.pdrb));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 async function handleDummyMenu(sock, jid, messageText, conv) {
@@ -255,7 +268,7 @@ async function handleDummyMenu(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Dummy Menu', MENUS.dummyMenu));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 async function handleDummySubmenu1(sock, jid, messageText, conv) {
@@ -268,7 +281,7 @@ async function handleDummySubmenu1(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Dummy Submenu 1', MENUS.dummySubmenu1));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 async function handleProdukMenu(sock, jid, messageText, conv) {
@@ -290,7 +303,7 @@ async function handleProdukMenu(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Produk', MENUS.produk));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 async function handleProduk1Menu(sock, jid, messageText, conv) {
@@ -303,11 +316,17 @@ async function handleProduk1Menu(sock, jid, messageText, conv) {
             await sendMessage(sock, jid, "Pilihan tidak valid. Silakan pilih menu:\n" + formatMenu('Detail Produk 1', MENUS.produk1));
             break;
     }
-    resetInactivityTimeout(sock, jid);
+    conv.resetTimeout(sock, jid);
 }
 
 // Start the WhatsApp bot
 async function startBot() {
+    if (botRunning) {
+        logger.info("Bot is already running, skipping start.");
+        return;
+    }
+    botRunning = true;
+
     await authorizeGoogle();
 
     const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -327,7 +346,10 @@ async function startBot() {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
             logger.info('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
             if (shouldReconnect) {
+                botRunning = false;
                 startBot();
+            } else {
+                botRunning = false;
             }
         } else if (connection === 'open') {
             logger.info('opened connection');
