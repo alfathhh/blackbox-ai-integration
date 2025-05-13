@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-chatbot-backend",
+  "version": "1.0.0",
+  "description": "Backend WhatsApp chatbot using Bailey with bot, cs, and user roles",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "baileys": "^4.4.0",
+    "googleapis": "^105.0.0",
+    "dotenv": "^16.0.3"
+  }
+}
