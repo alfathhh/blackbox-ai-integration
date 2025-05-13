@@ -1,5 +1,8 @@
 "use strict";
 
+const pino = require('pino');
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+
 require('dotenv').config();
 const fs = require("fs");
 const path = require("path");
@@ -24,7 +27,7 @@ async function authorizeGoogle() {
     try {
         const keyFile = SERVICE_ACCOUNT_KEY_PATH;
         if (!fs.existsSync(keyFile)) {
-            console.error("Service account key file not found. Please provide service-account-key.json");
+            logger.error("Service account key file not found. Please provide service-account-key.json");
             process.exit(1);
         }
         const key = require(path.resolve(keyFile));
@@ -37,7 +40,7 @@ async function authorizeGoogle() {
         await authClient.authorize();
         sheets = google.sheets({ version: 'v4', auth: authClient });
     } catch (error) {
-        console.error("Failed to authorize Google API client with service account:", error);
+        logger.error("Failed to authorize Google API client with service account:", error);
         process.exit(1);
     }
 }
@@ -55,7 +58,7 @@ async function appendChatLog(timestamp, from, message, senderType) {
             resource,
         });
     } catch (error) {
-        console.error("Error appending chat log:", error);
+        logger.error("Error appending chat log:", error);
     }
 }
 
@@ -93,7 +96,7 @@ async function sendMessage(sock, jid, message, isBot = true) {
     try {
         await sock.sendMessage(jid, { text: finalMessage });
     } catch (error) {
-        console.error("Failed to send message:", error);
+        logger.error("Failed to send message:", error);
     }
 }
 
@@ -308,7 +311,7 @@ async function startBot() {
     await authorizeGoogle();
 
     const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`Using WA version v${version.join('.')}, isLatest: ${isLatest}`);
+    logger.info(`Using WA version v${version.join('.')}, isLatest: ${isLatest}`);
 
     const sock = makeWASocket({
         version,
@@ -322,12 +325,12 @@ async function startBot() {
         const { connection, lastDisconnect } = update;
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
+            logger.info('connection closed due to ', lastDisconnect.error, ', reconnecting ', shouldReconnect);
             if (shouldReconnect) {
                 startBot();
             }
         } else if (connection === 'open') {
-            console.log('opened connection');
+            logger.info('opened connection');
         }
     });
 
@@ -338,4 +341,4 @@ async function startBot() {
     });
 }
 
-startBot().catch(err => console.error(err));
+startBot().catch(err => logger.error(err));
